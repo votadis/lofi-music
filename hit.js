@@ -1,82 +1,33 @@
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-puppeteer.use(StealthPlugin());
-
-const SITE_URL = 'https://votadis.github.io/autoplay/';
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function waitUntilPlaying(ytFrame, timeoutMs = 15000) {
-  const start = Date.now();
-
-  while (Date.now() - start < timeoutMs) {
-    const isPlaying = await ytFrame.evaluate(() => {
-      const v = document.querySelector('video');
-      if (!v) return { found: false };
-      return {
-        found: true,
-        paused: v.paused,
-        ended: v.ended,
-        currentTime: v.currentTime,
-        readyState: v.readyState
-      };
-    }).catch(() => ({ found: false }));
-
-    if (
-      isPlaying.found &&
-      !isPlaying.paused &&
-      !isPlaying.ended &&
-      isPlaying.readyState >= 2 &&
-      isPlaying.currentTime > 0.5
-    ) {
-      return true;
-    }
-
-    await sleep(500);
-  }
-
-  return false;
-}
+const puppeteer = require('puppeteer');
 
 (async () => {
   const browser = await puppeteer.launch({
-    headless: 'new',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--autoplay-policy=no-user-gesture-required',
-      '--mute-audio',
-      '--window-size=1920,1080',
-    ],
+    headless: "new",
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--mute-audio"]
   });
+  const page = await browser.newPage();
 
-  try {
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1920, height: 1080 });
+  await page.goto("https://votadis.github.io/autoplay/", { waitUntil: "networkidle2" });
+  console.log("Main page loaded");
 
-    await page.goto(SITE_URL, { waitUntil: 'networkidle2', timeout: 60000 });
-    console.log('Page loaded:', SITE_URL);
+  // List all frames
+  const frames = page.frames();
+  console.log("Frames count:", frames.length);
 
-    // Find the iframe
-    const ytFrame = page
-      .frames()
-      .find((f) =>
-        f.url().includes('youtube.com/embed') ||
-        f.url().includes('youtube-nocookie.com/embed')
-      );
+  for (const f of frames) {
+    console.log("Frame:", f.url());
 
-    if (!ytFrame) {
-      console.log('❌ Could not find YouTube iframe.');
-      return;
+    // Print main DOM snippet
+    try {
+      const snippet = await f.evaluate(() => {
+        const all = document.body ? document.body.innerHTML.slice(0, 200) : "";
+        return all;
+      });
+      console.log("Frame snippet:", snippet);
+    } catch (err) {
+      console.log("Could not read frame DOM (likely cross-origin)");
     }
-
-    const isPlaying = await waitUntilPlaying(ytFrame, 15000);
-
-    console.log(isPlaying ? '✅ Video is playing!' : '⚠️ Video not playing.');
-  } catch (err) {
-    console.error('❌ ERROR:', err);
-    process.exitCode = 1;
-  } finally {
-    await browser.close();
   }
+
+  await browser.close();
 })();
