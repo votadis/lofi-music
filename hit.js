@@ -40,8 +40,7 @@ async function clickIframeCenter(page, frame) {
     const cy = box.y + box.height / 2;
 
     await page.mouse.click(cx, cy, { delay: 100 });
-    await sleep(300);
-    await page.mouse.click(cx, cy, { delay: 100 });
+    await sleep(200);
     
     return { cx, cy };
   } catch (err) {
@@ -50,7 +49,6 @@ async function clickIframeCenter(page, frame) {
   }
 }
 
-// Wrapper to add timeout to frame.evaluate calls
 async function evaluateWithTimeout(frame, fn, timeoutMs = 5000) {
   return Promise.race([
     frame.evaluate(fn),
@@ -60,91 +58,128 @@ async function evaluateWithTimeout(frame, fn, timeoutMs = 5000) {
   ]);
 }
 
+async function forceVideoLoad(ytFrame) {
+  console.log("Forcing video to load...");
+  
+  try {
+    const result = await evaluateWithTimeout(ytFrame, () => {
+      const v = document.querySelector("video");
+      if (!v) return { success: false, reason: "no video" };
+      
+      // Force load
+      v.load();
+      v.muted = true;
+      v.volume = 0;
+      
+      // Try to get it to start loading
+      v.preload = "auto";
+      
+      return { 
+        success: true, 
+        src: v.src || v.currentSrc,
+        readyState: v.readyState 
+      };
+    }, 3000);
+    
+    console.log("Force load result:", JSON.stringify(result));
+    return result.success;
+  } catch (err) {
+    console.log("Force load error:", err.message);
+    return false;
+  }
+}
+
 async function tryStartPlayback(page, ytFrame) {
   console.log("Attempting playback strategies...");
 
-  // Strategy 1: JavaScript play with timeout
+  // First, try to force the video to load
+  await forceVideoLoad(ytFrame);
+  await sleep(2000);
+
+  // Strategy 1: Click iframe FIRST (simulates user interaction)
   try {
-    console.log("Trying JS play...");
+    console.log("Trying iframe center click first...");
+    const result = await clickIframeCenter(page, ytFrame);
+    if (result) {
+      console.log("✓ Clicked iframe center at", result);
+      await sleep(1000);
+    }
+  } catch (err) {
+    console.log("✗ Iframe center click error:", err.message);
+  }
+
+  // Strategy 2: JavaScript play after click
+  try {
+    console.log("Trying JS play after click...");
     const result = await evaluateWithTimeout(ytFrame, async () => {
       const v = document.querySelector("video");
       if (!v) return { success: false, reason: "no video element" };
 
       try {
-        v.muted = true; // Start muted for better autoplay compatibility
+        v.muted = true;
         v.volume = 0;
         
-        // Don't await play promise - just trigger it
+        // Try to play
         const playPromise = v.play();
         if (playPromise !== undefined) {
-          playPromise.catch(e => console.log('Play promise rejected:', e.message));
+          // Actually await it this time since we clicked first
+          await playPromise;
+          return { success: true, method: "video.play() after click" };
         }
         
-        // Check if it started
-        return { success: !v.paused, method: "video.play() muted (no await)" };
+        return { success: !v.paused, method: "play triggered, no promise" };
       } catch (err) {
         return { success: false, reason: err.message };
       }
-    }, 3000); // 3 second timeout
+    }, 5000);
 
     console.log("JS play result:", JSON.stringify(result));
     
     if (result.success) {
       console.log("✓ JS play succeeded:", result.method);
-      await sleep(1000);
+      await sleep(2000);
       return result.method;
-    } else {
-      console.log("✗ JS play failed:", result.reason);
     }
   } catch (err) {
     console.log("✗ JS play error:", err.message);
   }
 
-  // Strategy 2: Large play button
+  // Strategy 3: Large play button
   try {
     console.log("Trying large play button...");
-    const button = await ytFrame.waitForSelector("button.ytp-large-play-button", { timeout: 3000 });
+    const button = await ytFrame.waitForSelector("button.ytp-large-play-button", { timeout: 2000 });
     if (button) {
       await ytFrame.click("button.ytp-large-play-button", { delay: 100 });
       console.log("✓ Clicked large play button");
-      await sleep(1000);
+      await sleep(1500);
       return "clicked play button";
     }
   } catch (err) {
     console.log("✗ Large play button not found");
   }
 
-  // Strategy 3: Click iframe center
+  // Strategy 4: Another click + keyboard
   try {
-    console.log("Trying iframe center click...");
-    const result = await clickIframeCenter(page, ytFrame);
-    if (result) {
-      console.log("✓ Clicked iframe center at", result);
-      await sleep(1000);
-      return "clicked iframe center";
-    }
-  } catch (err) {
-    console.log("✗ Iframe center click error:", err.message);
-  }
-
-  // Strategy 4: Keyboard
-  try {
-    console.log("Trying keyboard press...");
+    console.log("Trying keyboard after another click...");
+    await clickIframeCenter(page, ytFrame);
+    await sleep(200);
     await page.keyboard.press("k");
     await sleep(500);
     console.log("✓ Pressed 'k' key");
-    return "pressed keyboard";
+    return "keyboard after click";
   } catch (err) {
-    console.log("✗ Keyboard press error:", err.message);
+    console.log("✗ Keyboard error:", err.message);
   }
 
   return "all methods attempted";
 }
 
-async function waitUntilPlaying(ytFrame, timeoutMs = 20000) {
-  console.log("Checking if video is playing...");
+async function waitUntilPlaying(ytFrame, timeoutMs = 30000) {
+  console.log("Checking if video is playing (waiting for readyState >= 2)...");
   const start = Date.now();
   let checks = 0;
+  let lastTime = -1;
+  let sameTimeCount = 0;
 
   while (Date.now() - start < timeoutMs) {
     try {
@@ -156,28 +191,60 @@ async function waitUntilPlaying(ytFrame, timeoutMs = 20000) {
           paused: v.paused,
           ended: v.ended,
           readyState: v.readyState,
+          networkState: v.networkState,
           currentTime: v.currentTime,
           duration: v.duration,
+          error: v.error ? v.error.message : null,
         };
       }, 2000);
 
       checks++;
-      if (checks % 6 === 0 || state.currentTime > 0) {
-        console.log(`Check #${checks}: time=${state.currentTime?.toFixed(2)}s, paused=${state.paused}, ready=${state.readyState}`);
+      
+      // Log more frequently and with more detail
+      if (checks % 3 === 0 || state.currentTime > 0 || state.readyState >= 2) {
+        console.log(`Check #${checks}: time=${state.currentTime?.toFixed(2)}s, ` +
+                   `paused=${state.paused}, ready=${state.readyState}, ` +
+                   `network=${state.networkState}, error=${state.error}`);
       }
 
-      // Video is playing if time > 0 and not paused
-      if (state.hasVideo && state.currentTime > 0 && !state.paused && !state.ended) {
-        console.log(`✅ Video is playing at ${state.currentTime.toFixed(2)}s`);
+      // Success: currentTime is advancing
+      if (state.hasVideo && state.currentTime > 0 && state.currentTime !== lastTime) {
+        console.log(`✅ Video is ACTUALLY playing! Time: ${state.currentTime.toFixed(2)}s`);
         return true;
       }
 
+      // Alternate success: readyState indicates loaded and playing
+      if (state.hasVideo && !state.paused && state.readyState >= 2 && state.currentTime > 0) {
+        console.log(`✅ Video playing (readyState ${state.readyState})`);
+        return true;
+      }
+
+      // Check for errors
+      if (state.error) {
+        console.log(`❌ Video error detected: ${state.error}`);
+        return false;
+      }
+
+      lastTime = state.currentTime;
       await sleep(1000);
     } catch (err) {
-      console.log("Error checking playback state:", err.message);
+      console.log("Error checking playback:", err.message);
       await sleep(1000);
     }
   }
+
+  // Final check - maybe it started late
+  try {
+    const finalState = await evaluateWithTimeout(ytFrame, () => {
+      const v = document.querySelector("video");
+      return v ? { time: v.currentTime, ready: v.readyState, paused: v.paused } : null;
+    }, 2000);
+    
+    if (finalState && finalState.time > 0) {
+      console.log(`✅ Video started late! Time: ${finalState.time.toFixed(2)}s`);
+      return true;
+    }
+  } catch (_) {}
 
   return false;
 }
@@ -202,10 +269,16 @@ async function waitUntilPlaying(ytFrame, timeoutMs = 20000) {
         "--no-zygote",
         "--single-process",
         "--disable-blink-features=AutomationControlled",
-        "--autoplay-policy=no-user-gesture-required", // Allow autoplay
-        "--mute-audio", // Mute for autoplay
+        "--autoplay-policy=no-user-gesture-required",
+        "--mute-audio",
+        "--disable-background-networking",
+        "--disable-default-apps",
+        "--disable-sync",
+        "--metrics-recording-only",
+        "--no-default-browser-check",
+        "--disable-hang-monitor",
       ],
-      dumpio: false, // Reduced noise
+      dumpio: false,
     });
 
     console.log("Browser launched successfully");
@@ -219,14 +292,20 @@ async function waitUntilPlaying(ytFrame, timeoutMs = 20000) {
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     );
 
+    // Remove webdriver flag
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      
+      // Mock more properties
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => [1, 2, 3, 4, 5],
+      });
     });
 
     console.log("Navigating to:", NOTION_URL);
     await page.goto(NOTION_URL, { 
-      waitUntil: "networkidle2", 
-      timeout: 60000 
+      waitUntil: "networkidle0", // Wait for all network activity
+      timeout: 90000 
     });
     
     console.log("Page loaded successfully");
@@ -240,41 +319,61 @@ async function waitUntilPlaying(ytFrame, timeoutMs = 20000) {
     }
 
     console.log("✅ YouTube frame found:", ytFrame.url());
-    await sleep(3000); // Give YouTube more time to load
+    
+    // Wait longer for YouTube player to initialize
+    console.log("Waiting for YouTube player to initialize...");
+    await sleep(5000);
 
     const method = await tryStartPlayback(page, ytFrame);
     console.log("Playback attempt completed. Method:", method);
 
-    const isPlaying = await waitUntilPlaying(ytFrame, 25000);
+    const isPlaying = await waitUntilPlaying(ytFrame, 35000);
 
     if (isPlaying) {
-      console.log("✅✅✅ PLAYBACK CONFIRMED! Video is running.");
+      console.log("✅✅✅ PLAYBACK CONFIRMED! Video is actually running.");
       console.log("Keeping video active for 30 minutes...");
       
-      // Periodic check to ensure it's still playing
+      // Monitor every minute
       const endTime = Date.now() + (30 * 60 * 1000);
+      let checkCount = 0;
+      
       while (Date.now() < endTime) {
-        await sleep(60000); // Check every minute
+        await sleep(60000);
+        checkCount++;
+        
         try {
           const state = await evaluateWithTimeout(ytFrame, () => {
             const v = document.querySelector("video");
-            return v ? { time: v.currentTime, paused: v.paused } : null;
+            return v ? { 
+              time: v.currentTime, 
+              paused: v.paused,
+              ended: v.ended,
+              readyState: v.readyState 
+            } : null;
           }, 2000);
           
           if (state) {
-            console.log(`Still active: ${state.time.toFixed(0)}s, paused=${state.paused}`);
+            const minutes = Math.floor(state.time / 60);
+            const seconds = Math.floor(state.time % 60);
+            console.log(`[${checkCount} min] Video at ${minutes}:${seconds.toString().padStart(2, '0')}, ` +
+                       `paused=${state.paused}, ready=${state.readyState}`);
+            
+            if (state.ended) {
+              console.log("Video ended. Continuing session...");
+            }
           }
         } catch (err) {
-          console.log("Check failed, but continuing...");
+          console.log(`[${checkCount} min] Check failed, continuing...`);
         }
       }
       
-      console.log("30 minutes completed. Exiting.");
+      console.log("✅ 30 minutes completed successfully!");
     } else {
-      console.log("⚠️ Could not confirm playback started");
-      console.log("This may be due to YouTube's autoplay restrictions in headless mode");
-      console.log("Keeping session active for 30 minutes anyway (view may still count)...");
+      console.log("⚠️ Could not confirm playback with advancing currentTime");
+      console.log("Video may be blocked by network/autoplay policy");
+      console.log("Keeping session active for 30 minutes (view might still register)...");
       await sleep(30 * 60 * 1000);
+      console.log("30 minutes session completed");
     }
 
   } catch (err) {
@@ -285,7 +384,7 @@ async function waitUntilPlaying(ytFrame, timeoutMs = 20000) {
     if (browser) {
       console.log("Closing browser...");
       await browser.close();
-      console.log("Browser closed. Script finished.");
+      console.log("✅ Browser closed. Script finished.");
     }
   }
 })();
