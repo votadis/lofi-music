@@ -3,15 +3,15 @@ name: lofi-hit
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/2 * * * *'
+    - cron: '*/5 * * * *'  # GitHub schedules are much more reliable at 5+ minutes
 
 jobs:
   hit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v3
+      - uses: actions/setup-node@v4
         with:
           node-version: 18
 
