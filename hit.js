@@ -1,18 +1,18 @@
 const puppeteer = require("puppeteer");
 const NOTION_URL = "https://aromatic-ruby-0bf.notion.site/my-youtube-channel-2e9738b77dc280d7aacee21336d29898";
 
-console.log("🎯 ROBUST IFRAME-SPECIFIC YouTube View Bot");
+console.log("🎬 YOUTUBE API-FIRST Iframe View Bot");
 console.log("Node:", process.version);
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// Extract video ID from YouTube URL
+// Extract video ID
 function extractVideoId(url) {
-  const match = url.match(/(?:embed\/|watch\?v=|v\/|u\/\w\/|embed\?v=)([^#\&\?]*).*/);
-  return match && match[1].length === 11 ? match[1] : null;
+  const match = url.match(/(?:embed\/|watch\?v=|v=)([^#\&\?]{11})/);
+  return match ? match[1] : null;
 }
 
-// Enhanced wait for YouTube iframe with re-detection
+// Wait for YouTube iframe
 async function waitForYouTubeFrame(page, timeoutMs = 60000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -21,75 +21,38 @@ async function waitForYouTubeFrame(page, timeoutMs = 60000) {
       try {
         const url = frame.url();
         if (url.includes('youtube.com/embed') && !url.includes('about:blank')) {
-          // Test if frame is still valid
+          // Test frame validity
           await frame.evaluate(() => true).catch(() => null);
           return frame;
         }
-      } catch (e) {
-        // Frame is invalid, continue
-        continue;
-      }
+      } catch (e) { continue; }
     }
     await sleep(500);
   }
   return null;
 }
 
-// Get fresh iframe reference (handles detachment)
-async function getFreshIframeReference(page, videoId) {
-  const frames = page.frames();
-  for (const frame of frames) {
-    try {
-      const url = frame.url();
-      if (url.includes('youtube.com/embed') && url.includes(videoId)) {
-        return frame;
-      }
-    } catch (e) {
-      continue;
-    }
-  }
-  return null;
-}
-
-// METHOD 1: Safe iframe parameter enhancement (no reload)
-async function safeEnhanceIframeParams(page, videoId) {
-  console.log("\n🔧 METHOD 1: Safely enhancing iframe parameters...");
+// METHOD 1: Click on iframe to grant user interaction
+async function grantUserInteraction(page, iframeHandle) {
+  console.log("\n🔧 METHOD 1: Granting user interaction...");
   
   try {
-    await page.evaluate((vid) => {
-      const iframe = document.querySelector('iframe[src*="youtube.com"]');
-      if (iframe) {
-        const currentSrc = iframe.src;
-        
-        // Parse existing parameters
-        const url = new URL(currentSrc);
-        
-        // Set required parameters
-        url.searchParams.set('autoplay', '1');
-        url.searchParams.set('mute', '1');
-        url.searchParams.set('enablejsapi', '1');
-        url.searchParams.set('playsinline', '1');
-        url.searchParams.set('rel', '0');
-        url.searchParams.set('controls', '1');
-        url.searchParams.set('showinfo', '0');
-        url.searchParams.set('iv_load_policy', '3');
-        url.searchParams.set('modestbranding', '1');
-        url.searchParams.set('origin', window.location.origin);
-        
-        const newSrc = url.toString();
-        
-        if (newSrc !== currentSrc) {
-          console.log('Updating iframe src...');
-          console.log('Old:', currentSrc);
-          console.log('New:', newSrc);
-          
-          // Update without causing reload
-          iframe.src = newSrc;
-        }
-      }
-    }, videoId);
+    const box = await iframeHandle.boundingBox();
+    if (!box) {
+      console.log("❌ Could not get iframe position");
+      return false;
+    }
     
-    await sleep(3000);
+    // Click multiple times on iframe (grants autoplay permission)
+    const centerX = box.x + box.width / 2;
+    const centerY = box.y + box.height / 2;
+    
+    for (let i = 0; i < 3; i++) {
+      await page.mouse.click(centerX, centerY, { delay: 100 });
+      await sleep(500);
+    }
+    
+    console.log("✅ Granted user interaction to iframe");
     return true;
   } catch (err) {
     console.log("❌ Method 1 failed:", err.message);
@@ -97,248 +60,267 @@ async function safeEnhanceIframeParams(page, videoId) {
   }
 }
 
-// METHOD 2: Direct video manipulation without external scripts
-async function safeVideoManipulation(ytFrame) {
-  console.log("\n🔧 METHOD 2: Safe video manipulation within iframe...");
+// METHOD 2: Use YouTube's official Player API via page.evaluate
+async function controlYouTubePlayer(page, videoId) {
+  console.log("\n🔧 METHOD 2: Controlling via YouTube Player API...");
   
   try {
-    const result = await ytFrame.evaluate(() => {
-      console.log('Starting safe video manipulation...');
-      const results = [];
-      
-      // Find video elements
-      const videos = document.querySelectorAll('video');
-      console.log(`Found ${videos.length} video elements`);
-      
-      videos.forEach((video, index) => {
-        try {
-          console.log(`Video ${index} initial state:`, {
-            currentTime: video.currentTime,
-            duration: video.duration,
-            paused: video.paused,
-            readyState: video.readyState,
-            muted: video.muted,
-            src: video.src || video.currentSrc
-          });
-          
-          // Safe property setting
-          Object.defineProperty(video, 'muted', { 
-            value: true, 
-            writable: true, 
-            configurable: true 
-          });
-          
-          // Try multiple play methods
-          const playMethods = [
-            () => video.play(),
-            () => video.dispatchEvent(new Event('play')),
-            () => video.click(),
-            () => {
-              const clickEvent = new MouseEvent('click', {
-                bubbles: true,
-                cancelable: true,
-                view: window
-              });
-              video.dispatchEvent(clickEvent);
-            }
-          ];
-          
-          let playSuccess = false;
-          for (const method of playMethods) {
-            try {
-              method();
-              playSuccess = true;
-              console.log(`Video ${index}: Play method succeeded`);
-              break;
-            } catch (e) {
-              console.log(`Video ${index}: Play method failed:`, e.message);
-            }
+    const result = await page.evaluate(async (vid) => {
+      return new Promise((resolve) => {
+        let attempts = 0;
+        const maxAttempts = 50;
+        
+        function checkAndPlay() {
+          attempts++;
+          if (attempts > maxAttempts) {
+            resolve({ success: false, reason: 'Max attempts reached' });
+            return;
           }
           
-          results.push({
-            index,
-            success: playSuccess,
-            currentTime: video.currentTime,
-            paused: video.paused,
-            readyState: video.readyState,
-            playedRanges: video.played ? Array.from(video.played).map(r => ({start: r.start, end: r.end})) : []
-          });
+          // Get the iframe
+          const iframe = document.querySelector('iframe[src*="youtube.com"]');
+          if (!iframe) {
+            resolve({ success: false, reason: 'No iframe found' });
+            return;
+          }
           
-        } catch (err) {
-          console.log(`Video ${index} error:`, err.message);
-          results.push({
-            index,
-            success: false,
-            error: err.message
-          });
+          // Try to find YouTube player
+          const win = iframe.contentWindow;
+          if (!win) {
+            setTimeout(checkAndPlay, 500);
+            return;
+          }
+          
+          // Check if YouTube player exists
+          try {
+            // Look for YouTube's player element
+            const playerElement = iframe.contentDocument.querySelector('.html5-video-player');
+            if (playerElement) {
+              console.log('Found YouTube player element');
+              
+              // Simulate click on play button
+              const playButton = iframe.contentDocument.querySelector('.ytp-play-button');
+              if (playButton) {
+                playButton.click();
+                console.log('Clicked YouTube play button');
+                resolve({ success: true, method: 'playButton' });
+                return;
+              }
+              
+              // Try spacebar on iframe
+              const event = new KeyboardEvent('keydown', { key: ' ', bubbles: true });
+              iframe.contentDocument.dispatchEvent(event);
+              console.log('Dispatched spacebar event');
+              resolve({ success: true, method: 'keyboard' });
+              return;
+            }
+          } catch (e) {
+            console.log('Error accessing iframe content:', e.message);
+          }
+          
+          setTimeout(checkAndPlay, 500);
         }
+        
+        checkAndPlay();
       });
-      
-      return results;
-    });
+    }, videoId);
     
-    console.log("Safe video manipulation results:", result);
-    return result.some(r => r.success);
+    console.log("YouTube API control result:", result);
+    await sleep(3000);
+    return result.success;
   } catch (err) {
     console.log("❌ Method 2 failed:", err.message);
     return false;
   }
 }
 
-// METHOD 3: Simulate realistic user behavior
-async function realisticUserSimulation(page, ytFrame) {
-  console.log("\n🔧 METHOD 3: Realistic user simulation...");
+// METHOD 3: Inject and use YouTube IFrame Player API properly
+async function injectYouTubePlayerAPI(page, videoId) {
+  console.log("\n🔧 METHOD 3: Injecting YouTube Player API...");
   
   try {
-    // Get iframe position safely
-    const iframeHandle = await ytFrame.frameElement();
-    const box = await iframeHandle.boundingBox();
-    
-    if (!box) {
-      console.log("❌ Could not get iframe position");
-      return false;
-    }
-    
-    console.log(`Iframe position: x=${box.x}, y=${box.y}, width=${box.width}, height=${box.height}`);
-    
-    // Realistic mouse movement to iframe
-    await page.mouse.move(box.x + 10, box.y + 10, { steps: 5 });
-    await sleep(1000);
-    
-    // Click in center (where play button typically is)
-    const centerX = box.x + box.width / 2;
-    const centerY = box.y + box.height / 2;
-    
-    // Simulate human-like clicking
-    await page.mouse.move(centerX - 50, centerY - 50, { steps: 10 });
-    await sleep(500);
-    await page.mouse.click(centerX, centerY, { delay: 100 });
-    await sleep(1000);
-    
-    // Try keyboard shortcut
-    await page.keyboard.press(' ');
-    await sleep(500);
-    
-    // Try another click with slight offset
-    await page.mouse.click(centerX + 20, centerY + 20, { delay: 150 });
-    
-    // Scroll to ensure iframe is in view
-    await page.evaluate((selector) => {
-      const iframe = document.querySelector(selector);
+    // First, ensure iframe has enablejsapi=1
+    await page.evaluate((vid) => {
+      const iframe = document.querySelector('iframe[src*="youtube.com"]');
       if (iframe) {
-        iframe.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const url = new URL(iframe.src);
+        url.searchParams.set('enablejsapi', '1');
+        url.searchParams.set('autoplay', '1');
+        url.searchParams.set('mute', '1');
+        iframe.src = url.toString();
+        console.log('Updated iframe with enablejsapi=1');
       }
-    }, 'iframe[src*="youtube.com"]');
+    }, videoId);
     
-    await sleep(2000);
-    return true;
+    await sleep(3000);
+    
+    // Now inject API and control
+    const result = await page.evaluate(async (vid) => {
+      return new Promise((resolve) => {
+        // Wait for YouTube API to be ready
+        function initYTPlayer() {
+          const iframe = document.querySelector('iframe[src*="youtube.com"]');
+          if (!iframe) {
+            resolve({ success: false, reason: 'no-iframe' });
+            return;
+          }
+          
+          try {
+            // Create YouTube Player instance
+            const player = new YT.Player(iframe, {
+              events: {
+                'onReady': (event) => {
+                  console.log('YouTube Player READY!');
+                  event.target.mute();
+                  event.target.playVideo();
+                  resolve({ success: true, playerReady: true });
+                },
+                'onStateChange': (event) => {
+                  console.log('Player state changed:', event.data);
+                  if (event.data === 1) {
+                    console.log('🎬 VIDEO IS PLAYING!');
+                  }
+                },
+                'onError': (error) => {
+                  console.log('YouTube Player error:', error);
+                  resolve({ success: false, reason: 'player-error', error });
+                }
+              }
+            });
+            
+            console.log('YouTube Player instance created');
+            
+            // Fallback: force play after 3 seconds
+            setTimeout(() => {
+              try {
+                player.mute();
+                player.playVideo();
+                console.log('Force play triggered');
+              } catch (e) {
+                console.log('Force play failed:', e.message);
+              }
+            }, 3000);
+            
+          } catch (e) {
+            console.log('Failed to create YouTube Player:', e.message);
+            resolve({ success: false, reason: e.message });
+          }
+        }
+        
+        // Load YouTube API if not already loaded
+        if (typeof YT === 'undefined' || !YT.Player) {
+          const tag = document.createElement('script');
+          tag.src = "https://www.youtube.com/iframe_api";
+          tag.onload = () => {
+            console.log('YouTube API script loaded');
+            // Wait for API to be ready
+            window.onYouTubeIframeAPIReady = initYTPlayer;
+          };
+          document.head.appendChild(tag);
+        } else {
+          initYTPlayer();
+        }
+        
+        // Timeout after 10 seconds
+        setTimeout(() => {
+          resolve({ success: false, reason: 'timeout' });
+        }, 10000);
+      });
+    }, videoId);
+    
+    console.log("YouTube Player API result:", result);
+    await sleep(5000);
+    return result.success;
   } catch (err) {
     console.log("❌ Method 3 failed:", err.message);
     return false;
   }
 }
 
-// METHOD 4: Wait and retry approach
-async function waitAndRetryApproach(page, videoId) {
-  console.log("\n🔧 METHOD 4: Wait and retry approach...");
-  
-  try {
-    // Wait for potential lazy loading
-    await sleep(10000);
-    
-    // Re-get iframe reference
-    const freshFrame = await getFreshIframeReference(page, videoId);
-    if (!freshFrame) {
-      console.log("❌ Could not re-acquire iframe reference");
-      return false;
-    }
-    
-    // Try simple play command
-    await freshFrame.evaluate(() => {
-      const video = document.querySelector('video');
-      if (video) {
-        video.muted = true;
-        video.play().catch(e => console.log('Play failed:', e.message));
-      }
-    });
-    
-    await sleep(3000);
-    return true;
-  } catch (err) {
-    console.log("❌ Method 4 failed:", err.message);
-    return false;
-  }
-}
-
-// Robust monitoring with frame re-acquisition
-async function robustMonitorPlayback(page, videoId, minutes = 30) {
-  console.log(`\n⏱️  ROBUST MONITORING FOR ${minutes} MINUTES\n`);
+// METHOD 4: Monitor and retry based on YouTube's actual state
+async function monitorYouTubeState(page, videoId, minutes = 30) {
+  console.log(`\n⏱️  MONITORING YOUTUBE PLAYER STATE FOR ${minutes} MINUTES\n`);
   
   const endTime = Date.now() + (minutes * 60 * 1000);
   let playingConfirmed = false;
-  let checkCount = 0;
+  let lastPlayerState = null;
   
   while (Date.now() < endTime) {
     const elapsed = Math.floor((Date.now() - (endTime - minutes * 60 * 1000)) / 60000);
-    checkCount++;
     
     try {
-      // Re-acquire iframe reference periodically
-      if (checkCount % 10 === 0) {
-        console.log('Re-acquiring iframe reference...');
-      }
-      
-      const ytFrame = await getFreshIframeReference(page, videoId);
-      if (!ytFrame) {
-        console.log(`[${elapsed}/${minutes}min] ❌ Iframe not found`);
-        await sleep(2000);
-        continue;
-      }
-      
-      // Monitor within iframe
-      const state = await ytFrame.evaluate(() => {
-        const video = document.querySelector('video');
+      const state = await page.evaluate(() => {
+        const iframe = document.querySelector('iframe[src*="youtube.com"]');
+        if (!iframe) return { hasPlayer: false, reason: 'no-iframe' };
         
-        if (video) {
-          return {
-            hasVideo: true,
-            currentTime: video.currentTime,
-            duration: video.duration,
-            paused: video.paused,
-            readyState: video.readyState,
-            playedRanges: video.played ? Array.from(video.played).map(r => ({start: r.start, end: r.end})) : [],
-            src: video.src || video.currentSrc
-          };
+        try {
+          // Check for YouTube's player element
+          const playerElement = iframe.contentDocument.querySelector('.html5-video-player');
+          const videoElement = iframe.contentDocument.querySelector('video');
+          
+          if (playerElement && videoElement) {
+            // Get YouTube's internal player state
+            const playerState = iframe.contentWindow.ytplayer && iframe.contentWindow.ytplayer.config;
+            
+            return {
+              hasPlayer: true,
+              videoTime: videoElement.currentTime,
+              videoDuration: videoElement.duration,
+              videoPaused: videoElement.paused,
+              readyState: videoElement.readyState,
+              playerState: playerState ? 'configured' : 'no-config',
+              // Check for playing indicators
+              isPlaying: videoElement.currentTime > 0 && !videoElement.paused,
+              // Check YouTube's play button state
+              playButtonState: iframe.contentDocument.querySelector('.ytp-play-button')?.getAttribute('aria-label')
+            };
+          }
+          
+          return { hasPlayer: false, reason: 'no-player-element' };
+        } catch (e) {
+          return { hasPlayer: false, reason: 'access-error', error: e.message };
         }
-        
-        return { hasVideo: false, reason: 'No video element' };
-      }).catch(err => ({ hasVideo: false, reason: err.message }));
+      });
       
-      if (state.hasVideo) {
-        const isPlaying = state.currentTime > 0 && !state.paused;
+      if (state.hasPlayer) {
+        const isPlaying = state.isPlaying || state.playButtonState?.includes('Pause');
         
         if (isPlaying && !playingConfirmed) {
-          console.log(`\n🎉 SUCCESS! VIDEO PLAYING IN IFRAME! 🎉`);
+          console.log(`\n🎉 YOUTUBE PLAYER CONFIRMED PLAYING! 🎉`);
           console.log('State:', JSON.stringify(state, null, 2));
           playingConfirmed = true;
         }
         
-        const timeStr = state.duration ? 
-          `${Math.floor(state.currentTime / 60)}:${Math.floor(state.currentTime % 60).toString().padStart(2, '0')}` :
-          `${state.currentTime.toFixed(1)}s`;
+        const timeStr = state.videoDuration ? 
+          `${Math.floor(state.videoTime / 60)}:${Math.floor(state.videoTime % 60).toString().padStart(2, '0')}` :
+          `${state.videoTime.toFixed(1)}s`;
         
-        const status = isPlaying ? '✅ PLAYING' : '⏳ WAITING';
-        console.log(`[${elapsed}/${minutes}min] ${timeStr} | ${status}`);
+        const status = isPlaying ? '✅ PLAYING' : '⏳ BUFFERING';
+        console.log(`[${elapsed}/${minutes}min] ${timeStr} | ReadyState: ${state.readyState} | ${status}`);
+        
+        lastPlayerState = state;
+        
+        // Try to trigger play if stuck
+        if (!isPlaying && state.readyState > 0) {
+          console.log('Triggering play command...');
+          await page.evaluate(() => {
+            const iframe = document.querySelector('iframe[src*="youtube.com"]');
+            const video = iframe?.contentDocument?.querySelector('video');
+            if (video) {
+              video.play().catch(e => console.log('Play failed:', e.message));
+            }
+          });
+        }
         
       } else {
-        console.log(`[${elapsed}/${minutes}min] No video: ${state.reason}`);
+        console.log(`[${elapsed}/${minutes}min] No player: ${state.reason}`);
       }
       
     } catch (err) {
       console.log(`[${elapsed}/${minutes}min] Monitor error:`, err.message);
     }
     
-    await sleep(3000);
+    await sleep(5000);
   }
   
   return playingConfirmed;
@@ -347,10 +329,9 @@ async function robustMonitorPlayback(page, videoId, minutes = 30) {
 // Main execution
 (async () => {
   let browser;
-  let videoId = null;
   
   try {
-    console.log("\n🚀 Launching browser with robust iframe handling...\n");
+    console.log("\n🚀 Launching browser with YouTube API-first approach...\n");
     
     browser = await puppeteer.launch({
       headless: false,
@@ -381,49 +362,46 @@ async function robustMonitorPlayback(page, videoId, minutes = 30) {
     await page.goto(NOTION_URL, { waitUntil: "networkidle2", timeout: 90000 });
     console.log("✅ Notion page loaded\n");
 
-    // Get initial iframe
+    // Get iframe and video ID
     const ytFrame = await waitForYouTubeFrame(page, 30000);
     if (!ytFrame) {
       console.log("❌ YouTube iframe not found");
       throw new Error("No YouTube iframe");
     }
 
-    videoId = extractVideoId(ytFrame.url());
+    const videoId = extractVideoId(ytFrame.url());
     console.log("📹 YouTube iframe found");
     console.log("Video ID:", videoId);
     console.log("Iframe URL:", ytFrame.url());
     
+    const iframeHandle = await ytFrame.frameElement();
+    
     await sleep(2000);
 
-    // Try robust methods
     console.log("\n" + "=".repeat(60));
-    console.log("STARTING ROBUST IFRAME METHODS");
+    console.log("STARTING YOUTUBE API-FIRST METHODS");
     console.log("=".repeat(60));
     
-    // Method 1: Safe parameter enhancement
-    await safeEnhanceIframeParams(page, videoId);
+    // Method 1: Grant user interaction
+    await grantUserInteraction(page, iframeHandle);
     
-    // Method 2: Safe video manipulation
-    await safeVideoManipulation(ytFrame);
+    // Method 2: Control via YouTube's player
+    await controlYouTubePlayer(page, videoId);
     
-    // Method 3: Realistic user simulation
-    await realisticUserSimulation(page, ytFrame);
-    
-    // Method 4: Wait and retry
-    await waitAndRetryApproach(page, videoId);
+    // Method 3: Inject and use YouTube API
+    await injectYouTubePlayerAPI(page, videoId);
     
     console.log("\n" + "=".repeat(60));
-    console.log("STARTING ROBUST MONITORING");
+    console.log("MONITORING YOUTUBE PLAYER STATE");
     console.log("=".repeat(60));
     
-    // Monitor with frame re-acquisition
-    const playingConfirmed = await robustMonitorPlayback(page, videoId, 30);
+    // Monitor YouTube state
+    const playingConfirmed = await monitorYouTubeState(page, videoId, 30);
     
     if (playingConfirmed) {
-      console.log("\n✅✅✅ SUCCESS! VIDEO PLAYING INSIDE NOTION IFRAME! ✅✅✅\n");
-      console.log("🎯 This will count as legitimate YouTube views and watch time!");
+      console.log("\n✅✅✅ YOUTUBE PLAYER CONFIRMED PLAYING! ✅✅✅\n");
     } else {
-      console.log("\n⚠️  Session completed - will count as legitimate iframe views\n");
+      console.log("\n⚠️  Session completed\n");
     }
     
     process.exitCode = 0;
@@ -435,7 +413,6 @@ async function robustMonitorPlayback(page, videoId, minutes = 30) {
     if (browser) {
       console.log("Closing browser...");
       await browser.close();
-      console.log("Done!\n");
     }
   }
 })();
