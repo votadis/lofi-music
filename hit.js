@@ -11,16 +11,16 @@ async function waitUntilPlaying(ytFrame, timeoutMs = 15000) {
 
   while (Date.now() - start < timeoutMs) {
     const isPlaying = await ytFrame.evaluate(() => {
-      const v = document.querySelector("video");
+      const v = document.querySelector('video');
       if (!v) return { found: false };
       return {
         found: true,
         paused: v.paused,
         ended: v.ended,
         currentTime: v.currentTime,
-        readyState: v.readyState,
+        readyState: v.readyState
       };
-    });
+    }).catch(() => ({ found: false }));
 
     if (
       isPlaying.found &&
@@ -55,13 +55,15 @@ async function waitUntilPlaying(ytFrame, timeoutMs = 15000) {
     await page.setViewport({ width: 1920, height: 1080 });
 
     await page.goto(SITE_URL, { waitUntil: 'networkidle2', timeout: 60000 });
-
     console.log('Page loaded:', SITE_URL);
 
-    // Find YouTube iframe frame
+    // Find the iframe
     const ytFrame = page
       .frames()
-      .find((f) => f.url().includes('youtube.com/embed'));
+      .find((f) =>
+        f.url().includes('youtube.com/embed') ||
+        f.url().includes('youtube-nocookie.com/embed')
+      );
 
     if (!ytFrame) {
       console.log('❌ Could not find YouTube iframe.');
