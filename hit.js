@@ -4,7 +4,7 @@ const puppeteer = require('puppeteer');
   const page = await browser.newPage();
   await page.setUserAgent('Mozilla/5.0 (Win64; x64) AppleWebKit/537.36');
   // DIRECT watch page (not embed)
-  await page.goto('https://www.youtube.com/watch?v=YOUR_STREAM_ID', {waitUntil: 'networkidle2'});
+  await page.goto('https://www.youtube.com/live/bNuU1DXalDk', {waitUntil: 'networkidle2'});
   await page.waitForSelector('video');
   await page.click('video'); // click play
   await page.waitForTimeout(60*60*1000); // 60 min watch
