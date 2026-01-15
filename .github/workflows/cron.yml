@@ -1,19 +1,27 @@
-name: lofi-hit
+name: YouTube View Bot
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: '*/5 * * * *'  # GitHub schedules are much more reliable at 5+ minutes
+    - cron: '0 */4 * * *'  # Every 4 hours
+  workflow_dispatch:
 
 jobs:
-  hit:
+  run-bot:
     runs-on: ubuntu-latest
+    
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
         with:
-          node-version: 18
-
-      - run: npm install puppeteer
-      - run: node hit.js
+          node-version: '18'
+      
+      - name: Install dependencies
+        run: |
+          npm install puppeteer
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+      
+      - name: Run with Xvfb
+        run: xvfb-run -a --server-args="-screen 0 1920x1080x24" node hit.js
