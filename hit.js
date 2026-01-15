@@ -1,369 +1,362 @@
 const puppeteer = require("puppeteer");
-const NOTION_URL = "https://aromatic-ruby-0bf.notion.site/my-youtube-channel-2e9738b77dc280d7aacee21336d29898";
 
-console.log("🎯 IFRAME-SPECIFIC YouTube View Bot");
+const NOTION_URL = "https://aromatic-ruby-0bf.notion.site/my-youtube-channel-2e9738b77dc280d7aacee21336d29898";
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+console.log("🚀 YouTube Iframe Playback Bot");
 console.log("Node:", process.version);
 
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-// Extract video ID from YouTube URL
 function extractVideoId(url) {
-  const match = url.match(/(?:embed\/|watch\?v=|v\/|u\/\w\/|embed\?v=)([^#\&\?]*).*/);
-  return match && match[1].length === 11 ? match[1] : null;
+  const match = url.match(/embed\/([a-zA-Z0-9_-]+)/);
+  return match ? match[1] : null;
 }
 
-// Wait for YouTube iframe specifically
 async function waitForYouTubeFrame(page, timeoutMs = 60000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const frames = page.frames();
-    for (const frame of frames) {
-      const url = frame.url();
-      if (url.includes('youtube.com/embed') && !url.includes('about:blank')) {
-        return frame;
-      }
-    }
+    const frame = page
+      .frames()
+      .find((f) => /youtube\.com|youtu\.be/i.test(f.url()) && f.url() !== "about:blank");
+    if (frame) return frame;
     await sleep(500);
   }
   return null;
 }
 
-// METHOD 1: Manipulate iframe src to add autoplay parameters
-async function enhanceIframeParams(page, videoId) {
-  console.log("\n🔧 METHOD 1: Enhancing iframe parameters...");
+async function evaluateWithTimeout(target, fn, timeoutMs = 5000) {
+  return Promise.race([
+    target.evaluate(fn),
+    new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Timeout')), timeoutMs)
+    )
+  ]);
+}
+
+// AGGRESSIVE METHOD 1: Replace iframe src with alternative embed services
+async function replaceIframeWithAlternatives(page, videoId) {
+  console.log("\n🔧 METHOD 1: Replacing iframe with alternative embeds...");
+  
+  const alternatives = [
+    // YouTube nocookie with all autoplay params
+    `https://www.youtube-nocookie.com/embed/${videoId}?autoplay=1&mute=1&controls=1&enablejsapi=1&modestbranding=1&rel=0&loop=1&playlist=${videoId}`,
+    // Invidious embed
+    `https://invidious.privacydev.net/embed/${videoId}?autoplay=1`,
+    // Another Invidious instance
+    `https://inv.nadeko.net/embed/${videoId}?autoplay=1`,
+    // Piped embed
+    `https://piped.video/embed/${videoId}?autoplay=1`,
+  ];
+  
+  for (let i = 0; i < alternatives.length; i++) {
+    const url = alternatives[i];
+    console.log(`   Trying alternative ${i + 1}: ${url.split('/')[2]}...`);
+    
+    try {
+      // Replace iframe src
+      await page.evaluate((newUrl) => {
+        const iframe = document.querySelector('iframe[src*="youtube"]') || 
+                      document.querySelector('iframe[src*="invidious"]') ||
+                      document.querySelector('iframe[src*="piped"]');
+        if (iframe) {
+          iframe.src = newUrl;
+          console.log("Iframe src replaced with:", newUrl);
+        }
+      }, url);
+      
+      console.log("   ✅ Iframe replaced, waiting for load...");
+      await sleep(8000); // Wait for new iframe to load
+      
+      // Get the new frame
+      const frames = page.frames();
+      const newFrame = frames.find(f => 
+        f.url().includes('youtube') || 
+        f.url().includes('invidious') || 
+        f.url().includes('piped')
+      );
+      
+      if (!newFrame) {
+        console.log("   ❌ New frame not found");
+        continue;
+      }
+      
+      console.log("   Found frame:", newFrame.url());
+      
+      // Click center of iframe
+      try {
+        const iframeHandle = await newFrame.frameElement();
+        const box = await iframeHandle.boundingBox();
+        if (box) {
+          await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+          await sleep(500);
+        }
+      } catch (e) {}
+      
+      // Try to play
+      try {
+        await evaluateWithTimeout(newFrame, () => {
+          const v = document.querySelector('video');
+          if (v) {
+            v.muted = true;
+            v.play().catch(() => {});
+          }
+        }, 3000);
+      } catch (e) {}
+      
+      await sleep(3000);
+      
+      // Check if playing
+      const state = await evaluateWithTimeout(newFrame, () => {
+        const v = document.querySelector('video');
+        if (!v) return null;
+        return {
+          time: v.currentTime,
+          paused: v.paused,
+          readyState: v.readyState,
+          src: !!(v.src || v.currentSrc)
+        };
+      }, 3000).catch(() => null);
+      
+      console.log("   State:", JSON.stringify(state));
+      
+      if (state && state.time > 0 && !state.paused) {
+        console.log("   🎉 SUCCESS! Video playing in iframe!");
+        return { success: true, frame: newFrame };
+      }
+      
+      if (state && state.src && state.readyState > 0) {
+        console.log("   ⚠️ Video loaded but not playing yet, continuing with this...");
+        return { success: true, frame: newFrame };
+      }
+      
+    } catch (err) {
+      console.log("   ❌ Error:", err.message);
+      continue;
+    }
+  }
+  
+  return { success: false, frame: null };
+}
+
+// AGGRESSIVE METHOD 2: Inject YouTube IFrame API into page
+async function injectYouTubeAPI(page, videoId) {
+  console.log("\n🔧 METHOD 2: Injecting YouTube IFrame API...");
   
   try {
     await page.evaluate((vid) => {
-      const iframe = document.querySelector('iframe[src*="youtube.com"]');
-      if (iframe) {
-        const currentSrc = iframe.src;
-        let newSrc = currentSrc;
+      return new Promise((resolve) => {
+        // Load IFrame API
+        const tag = document.createElement('script');
+        tag.src = "https://www.youtube.com/iframe_api";
+        tag.onload = () => {
+          console.log("YouTube API loaded");
+          resolve();
+        };
+        document.head.appendChild(tag);
         
-        // Add/ensure autoplay parameters
-        if (!newSrc.includes('autoplay')) {
-          newSrc += (newSrc.includes('?') ? '&' : '?') + 'autoplay=1';
-        }
-        if (!newSrc.includes('mute')) {
-          newSrc += '&mute=1';
-        }
-        if (!newSrc.includes('enablejsapi')) {
-          newSrc += '&enablejsapi=1';
-        }
-        if (!newSrc.includes('playsinline')) {
-          newSrc += '&playsinline=1';
-        }
-        if (!newSrc.includes('rel')) {
-          newSrc += '&rel=0';
-        }
-        if (!newSrc.includes('controls')) {
-          newSrc += '&controls=1';
-        }
-        
-        // Only update if we made changes
-        if (newSrc !== currentSrc) {
-          console.log('Updating iframe src from:', currentSrc);
-          console.log('To:', newSrc);
-          iframe.src = newSrc;
-        }
-      }
-    }, videoId);
-    
-    await sleep(3000);
-    return true;
-  } catch (err) {
-    console.log("❌ Method 1 failed:", err.message);
-    return false;
-  }
-}
-
-// METHOD 2: Inject YouTube API directly into the iframe
-async function injectYouTubeAPIIntoIframe(ytFrame, videoId) {
-  console.log("\n🔧 METHOD 2: Injecting YouTube API into iframe...");
-  
-  try {
-    await ytFrame.evaluate((vid) => {
-      // Check if YouTube API is already loaded
-      if (typeof YT !== 'undefined' && YT.Player) {
-        console.log('YouTube API already available');
-        return true;
-      }
-      
-      // Load YouTube API
-      const tag = document.createElement('script');
-      tag.src = "https://www.youtube.com/iframe_api";
-      const firstScriptTag = document.getElementsByTagName('script')[0];
-      firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
-      
-      // Wait for API to be ready
-      window.onYouTubeIframeAPIReady = function() {
-        console.log('YouTube API ready');
-        
-        // Try to access existing player or create new one
-        const video = document.querySelector('video');
-        if (video) {
-          console.log('Found video element, attempting to play...');
-          video.muted = true;
-          video.play().catch(e => console.log('Video play failed:', e));
-        }
-      };
-    }, videoId);
-    
-    await sleep(5000);
-    return true;
-  } catch (err) {
-    console.log("❌ Method 2 failed:", err.message);
-    return false;
-  }
-}
-
-// METHOD 3: Direct video element manipulation within iframe
-async function manipulateVideoInIframe(ytFrame) {
-  console.log("\n🔧 METHOD 3: Manipulating video element in iframe...");
-  
-  try {
-    const result = await ytFrame.evaluate(() => {
-      const results = [];
-      
-      // Find all video elements
-      const videos = document.querySelectorAll('video');
-      console.log(`Found ${videos.length} video elements`);
-      
-      videos.forEach((video, index) => {
-        try {
-          console.log(`Processing video ${index}:`, {
-            src: video.src || video.currentSrc,
-            paused: video.paused,
-            readyState: video.readyState,
-            duration: video.duration,
-            currentTime: video.currentTime
-          });
-          
-          // Force video settings
-          video.muted = true;
-          video.preload = 'auto';
-          video.autoplay = true;
-          
-          // Remove restrictions
-          video.removeAttribute('loop');
-          video.setAttribute('playsinline', '');
-          
-          // Try to play
-          const playPromise = video.play();
-          if (playPromise) {
-            playPromise.then(() => {
-              console.log(`Video ${index} play succeeded`);
-            }).catch(e => {
-              console.log(`Video ${index} play failed:`, e.message);
-            });
+        // Set up API ready callback
+        window.onYouTubeIframeAPIReady = function() {
+          const iframe = document.querySelector('iframe[src*="youtube"]');
+          if (!iframe) {
+            console.log("No iframe found");
+            return;
           }
           
-          results.push({
-            index,
-            success: true,
-            paused: video.paused,
-            currentTime: video.currentTime,
-            readyState: video.readyState
-          });
+          // Add enablejsapi parameter if missing
+          const currentSrc = iframe.src;
+          if (!currentSrc.includes('enablejsapi')) {
+            iframe.src = currentSrc + (currentSrc.includes('?') ? '&' : '?') + 'enablejsapi=1';
+          }
           
-        } catch (err) {
-          results.push({
-            index,
-            success: false,
-            error: err.message
-          });
-        }
+          setTimeout(() => {
+            const player = new YT.Player(iframe, {
+              events: {
+                'onReady': (event) => {
+                  console.log("Player ready");
+                  event.target.mute();
+                  event.target.playVideo();
+                  console.log("Play command sent");
+                },
+                'onStateChange': (event) => {
+                  console.log("State changed:", event.data);
+                }
+              }
+            });
+          }, 2000);
+        };
+        
+        // Trigger ready if API already loaded
+        setTimeout(() => {
+          if (window.YT && window.YT.Player) {
+            window.onYouTubeIframeAPIReady();
+          }
+        }, 3000);
       });
-      
-      return results;
-    });
+    }, videoId);
     
-    console.log("Video manipulation results:", result);
-    return result.some(r => r.success);
+    console.log("   ✅ API injected, waiting for player...");
+    await sleep(8000);
+    
+    // Check frame
+    const ytFrame = await waitForYouTubeFrame(page);
+    if (!ytFrame) {
+      console.log("   ❌ Frame lost");
+      return { success: false, frame: null };
+    }
+    
+    const state = await evaluateWithTimeout(ytFrame, () => {
+      const v = document.querySelector('video');
+      return v ? {
+        time: v.currentTime,
+        paused: v.paused,
+        readyState: v.readyState
+      } : null;
+    }, 3000).catch(() => null);
+    
+    console.log("   State:", JSON.stringify(state));
+    
+    if (state && state.time > 0) {
+      console.log("   🎉 SUCCESS with YouTube API!");
+      return { success: true, frame: ytFrame };
+    }
+    
+    return { success: false, frame: ytFrame };
+    
   } catch (err) {
-    console.log("❌ Method 3 failed:", err.message);
-    return false;
+    console.log("   ❌ Error:", err.message);
+    return { success: false, frame: null };
   }
 }
 
-// METHOD 4: Simulate user interactions within iframe
-async function simulateUserInteractions(page, ytFrame) {
-  console.log("\n🔧 METHOD 4: Simulating user interactions in iframe...");
+// AGGRESSIVE METHOD 3: Multiple aggressive clicks + force play loop
+async function aggressiveForcePlay(page, ytFrame) {
+  console.log("\n🔧 METHOD 3: Aggressive force play in original iframe...");
   
   try {
-    // Get iframe position
     const iframeHandle = await ytFrame.frameElement();
     const box = await iframeHandle.boundingBox();
     
     if (!box) {
-      console.log("❌ Could not get iframe position");
-      return false;
+      console.log("   ❌ Can't get iframe position");
+      return { success: false, frame: ytFrame };
     }
     
-    console.log(`Iframe position: x=${box.x}, y=${box.y}, width=${box.width}, height=${box.height}`);
+    // Click many times in different positions
+    console.log("   Clicking iframe extensively...");
+    const positions = [
+      { x: box.x + box.width / 2, y: box.y + box.height / 2 },
+      { x: box.x + box.width / 3, y: box.y + box.height / 2 },
+      { x: box.x + box.width * 2/3, y: box.y + box.height / 2 },
+      { x: box.x + box.width / 2, y: box.y + box.height / 3 },
+      { x: box.x + 100, y: box.y + 100 },
+    ];
     
-    // Click in the center of the iframe (where play button would be)
-    const centerX = box.x + box.width / 2;
-    const centerY = box.y + box.height / 2;
+    for (const pos of positions) {
+      await page.mouse.click(pos.x, pos.y, { delay: 50 });
+      await sleep(100);
+    }
     
-    // Multiple click attempts
+    // Try all keyboard shortcuts
+    console.log("   Trying keyboard shortcuts...");
+    const keys = [' ', 'k', 'm', 'Enter'];
+    for (const key of keys) {
+      await page.keyboard.press(key);
+      await sleep(200);
+    }
+    
+    // Force play in loop
+    console.log("   Force playing in loop...");
     for (let i = 0; i < 5; i++) {
-      await page.mouse.click(centerX, centerY, { delay: 100 });
-      await sleep(1000);
+      try {
+        await ytFrame.evaluate(() => {
+          const v = document.querySelector('video');
+          if (v) {
+            v.muted = true;
+            v.volume = 0;
+            v.autoplay = true;
+            v.load();
+            v.play().catch(() => {});
+          }
+        });
+        await sleep(1000);
+      } catch (e) {}
     }
-    
-    // Try keyboard shortcuts
-    await page.focus(ytFrame);
-    await page.keyboard.press(' ');
-    await sleep(500);
-    await page.keyboard.press('k');
-    await sleep(500);
-    
-    // Send click events directly to iframe
-    await ytFrame.evaluate(() => {
-      // Click on various elements that might be play buttons
-      const possibleButtons = document.querySelectorAll(
-        'button, .ytp-play-button, .ytp-large-play-button, [aria-label*="play"], [title*="play"]'
-      );
-      
-      possibleButtons.forEach((btn, index) => {
-        setTimeout(() => {
-          btn.click();
-          console.log(`Clicked button ${index}`);
-        }, index * 500);
-      });
-      
-      // Also try clicking on video element itself
-      const videos = document.querySelectorAll('video');
-      videos.forEach((video, index) => {
-        setTimeout(() => {
-          video.click();
-          console.log(`Clicked video ${index}`);
-        }, (possibleButtons.length + index) * 500);
-      });
-    });
     
     await sleep(3000);
-    return true;
-  } catch (err) {
-    console.log("❌ Method 4 failed:", err.message);
-    return false;
-  }
-}
-
-// METHOD 5: Force reload iframe with optimal parameters
-async function forceReloadIframe(page, videoId) {
-  console.log("\n🔧 METHOD 5: Force reloading iframe with optimal parameters...");
-  
-  try {
-    await page.evaluate((vid) => {
-      const iframe = document.querySelector('iframe[src*="youtube.com"]');
-      if (iframe) {
-        // Store current iframe
-        const parent = iframe.parentNode;
-        const nextSibling = iframe.nextSibling;
-        
-        // Create new iframe with optimal parameters
-        const newIframe = document.createElement('iframe');
-        newIframe.src = `https://www.youtube.com/embed/${vid}?autoplay=1&mute=1&enablejsapi=1&playsinline=1&rel=0&controls=1&showinfo=0&iv_load_policy=3&modestbranding=1`;
-        newIframe.width = iframe.width || '100%';
-        newIframe.height = iframe.height || '100%';
-        newIframe.frameBorder = '0';
-        newIframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture';
-        newIframe.setAttribute('allowfullscreen', '');
-        
-        // Replace old iframe
-        parent.insertBefore(newIframe, nextSibling);
-        
-        // Remove old iframe after a delay
-        setTimeout(() => {
-          if (iframe.parentNode) {
-            iframe.parentNode.removeChild(iframe);
-          }
-        }, 1000);
-        
-        console.log('Iframe replaced with optimized version');
-      }
-    }, videoId);
     
-    await sleep(5000);
-    return true;
+    const state = await evaluateWithTimeout(ytFrame, () => {
+      const v = document.querySelector('video');
+      return v ? {
+        time: v.currentTime,
+        paused: v.paused,
+        readyState: v.readyState,
+        networkState: v.networkState
+      } : null;
+    }, 3000).catch(() => null);
+    
+    console.log("   State:", JSON.stringify(state));
+    
+    if (state && state.time > 0) {
+      console.log("   🎉 SUCCESS! Video playing!");
+      return { success: true, frame: ytFrame };
+    }
+    
+    // Even if not confirmed, return the frame
+    return { success: false, frame: ytFrame };
+    
   } catch (err) {
-    console.log("❌ Method 5 failed:", err.message);
-    return false;
+    console.log("   ❌ Error:", err.message);
+    return { success: false, frame: ytFrame };
   }
 }
 
-// Advanced monitoring specifically for iframe playback
-async function monitorIframePlayback(page, ytFrame, minutes = 30) {
-  console.log(`\n⏱️  MONITORING IFRAME PLAYBACK FOR ${minutes} MINUTES\n`);
+async function monitorIframePlayback(page, frame, minutes = 30) {
+  console.log(`\n⏱️  MONITORING IFRAME FOR ${minutes} MINUTES\n`);
   
   const endTime = Date.now() + (minutes * 60 * 1000);
   let playingConfirmed = false;
-  let lastState = null;
+  let lastTime = -1;
   
   while (Date.now() < endTime) {
     const elapsed = Math.floor((Date.now() - (endTime - minutes * 60 * 1000)) / 60000);
     
     try {
-      // Monitor specifically within the iframe
-      const state = await ytFrame.evaluate(() => {
-        const video = document.querySelector('video');
-        
-        if (video) {
-          return {
-            hasVideo: true,
-            currentTime: video.currentTime,
-            duration: video.duration,
-            paused: video.paused,
-            readyState: video.readyState,
-            muted: video.muted,
-            src: video.src || video.currentSrc,
-            played: video.played ? Array.from(video.played).map(r => ({start: r.start, end: r.end})) : []
-          };
-        }
-        
-        // Also check for YouTube API state
-        if (window.YT && window.YT.Player) {
-          // Look for any YouTube player instances
-          const playerElements = document.querySelectorAll('#player, .youtube-player');
-          for (const el of playerElements) {
-            if (el.getPlayerState && el.getPlayerState() === 1) {
-              return {
-                hasVideo: true,
-                youtubeApiPlaying: true,
-                currentTime: el.getCurrentTime ? el.getCurrentTime() : 0,
-                duration: el.getDuration ? el.getDuration() : 0
-              };
-            }
-          }
-        }
-        
-        return { hasVideo: false };
-      });
+      const state = await evaluateWithTimeout(frame, () => {
+        const v = document.querySelector('video');
+        return v ? {
+          time: v.currentTime,
+          paused: v.paused,
+          readyState: v.readyState,
+          networkState: v.networkState,
+          src: !!(v.src || v.currentSrc)
+        } : null;
+      }, 3000);
       
-      if (state.hasVideo) {
-        const isPlaying = (state.currentTime > 0 && !state.paused) || state.youtubeApiPlaying;
+      if (state) {
+        const timeAdvanced = state.time > lastTime && state.time > 0;
         
-        if (isPlaying && !playingConfirmed) {
-          console.log(`\n🎉 SUCCESS! VIDEO PLAYING IN IFRAME! 🎉`);
-          console.log('State:', JSON.stringify(state, null, 2));
+        if (timeAdvanced && !playingConfirmed) {
+          console.log(`\n🎉 VIDEO IS PLAYING IN IFRAME! Time: ${state.time.toFixed(2)}s\n`);
           playingConfirmed = true;
         }
         
-        const timeStr = state.duration ? 
-          `${Math.floor(state.currentTime / 60)}:${Math.floor(state.currentTime % 60).toString().padStart(2, '0')}/${Math.floor(state.duration / 60)}:${Math.floor(state.duration % 60).toString().padStart(2, '0')}` :
-          `${state.currentTime.toFixed(1)}s`;
+        if (elapsed % 2 === 0 || timeAdvanced) {
+          const mins = Math.floor(state.time / 60);
+          const secs = Math.floor(state.time % 60);
+          const status = playingConfirmed ? '✅ PLAYING' : (state.src ? '⏳ loaded' : '❌ no src');
+          
+          console.log(
+            `[${elapsed}/${minutes}min] ${mins}:${secs.toString().padStart(2, '0')} | ` +
+            `ready:${state.readyState} net:${state.networkState} | ${status}`
+          );
+        }
         
-        const status = isPlaying ? '✅ PLAYING' : '⏳ BUFFERING';
-        console.log(`[${elapsed}/${minutes}min] ${timeStr} | ${status}`);
-        
-        lastState = state;
-      } else {
-        console.log(`[${elapsed}/${minutes}min] No video detected in iframe`);
+        lastTime = state.time;
       }
       
     } catch (err) {
-      console.log(`[${elapsed}/${minutes}min] Monitor error:`, err.message);
+      if (elapsed % 5 === 0) {
+        console.log(`[${elapsed}/${minutes}min] Check failed, continuing...`);
+      }
     }
     
     await sleep(5000);
@@ -372,12 +365,11 @@ async function monitorIframePlayback(page, ytFrame, minutes = 30) {
   return playingConfirmed;
 }
 
-// Main execution
 (async () => {
   let browser;
   
   try {
-    console.log("\n🚀 Launching browser for iframe-specific playback...\n");
+    console.log("\n🚀 Launching browser...\n");
     
     browser = await puppeteer.launch({
       headless: false,
@@ -389,7 +381,7 @@ async function monitorIframePlayback(page, ytFrame, minutes = 30) {
         "--start-maximized",
         "--disable-blink-features=AutomationControlled",
         "--autoplay-policy=no-user-gesture-required",
-        "--disable-features=PreloadMediaEngagementData",
+        "--disable-features=IsolateOrigins,site-per-process",
       ],
       defaultViewport: null,
     });
@@ -406,60 +398,66 @@ async function monitorIframePlayback(page, ytFrame, minutes = 30) {
 
     console.log("📄 Loading Notion page...");
     await page.goto(NOTION_URL, { waitUntil: "networkidle2", timeout: 90000 });
-    console.log("✅ Notion page loaded\n");
+    console.log("✅ Page loaded\n");
 
-    // Wait for YouTube iframe
-    const ytFrame = await waitForYouTubeFrame(page, 30000);
+    const ytFrame = await waitForYouTubeFrame(page, 90000);
+    
     if (!ytFrame) {
       console.log("❌ YouTube iframe not found");
-      throw new Error("No YouTube iframe");
+      throw new Error("No iframe");
     }
 
     const videoId = extractVideoId(ytFrame.url());
-    console.log("📹 YouTube iframe found");
-    console.log("Video ID:", videoId);
-    console.log("Iframe URL:", ytFrame.url());
+    console.log("✅ YouTube iframe found");
+    console.log("📹 Video ID:", videoId);
+    console.log("🔗 Original URL:", ytFrame.url());
     
-    await sleep(2000);
+    await sleep(3000);
 
-    // Try all iframe-specific methods
-    console.log("\n" + "=".repeat(60));
-    console.log("STARTING IFRAME-SPECIFIC METHODS");
-    console.log("=".repeat(60));
-    
+    console.log("\n🎯 Attempting to play video IN IFRAME...\n");
+
+    let activeFrame = ytFrame;
     let success = false;
-    
-    // Method 1: Enhance iframe parameters
-    await enhanceIframeParams(page, videoId);
-    
-    // Method 2: Inject YouTube API into iframe
-    await injectYouTubeAPIIntoIframe(ytFrame, videoId);
-    
-    // Method 3: Manipulate video element within iframe
-    const videoManipulated = await manipulateVideoInIframe(ytFrame);
-    if (videoManipulated) success = true;
-    
-    // Method 4: Simulate user interactions
-    await simulateUserInteractions(page, ytFrame);
-    
-    // Method 5: Force reload iframe
-    await forceReloadIframe(page, videoId);
-    
-    // Wait a bit for everything to settle
-    await sleep(5000);
-    
+
+    // Try Method 1: Replace with alternatives
+    if (!success && videoId) {
+      const result = await replaceIframeWithAlternatives(page, videoId);
+      if (result.success) {
+        success = true;
+        activeFrame = result.frame;
+      }
+    }
+
+    // Try Method 2: YouTube IFrame API
+    if (!success && videoId) {
+      const result = await injectYouTubeAPI(page, videoId);
+      if (result.success) {
+        success = true;
+        activeFrame = result.frame;
+      }
+    }
+
+    // Try Method 3: Aggressive force play
+    if (!success) {
+      const result = await aggressiveForcePlay(page, ytFrame);
+      activeFrame = result.frame;
+      success = result.success;
+    }
+
     console.log("\n" + "=".repeat(60));
-    console.log("STARTING IFRAME MONITORING");
+    if (success) {
+      console.log("✅ PLAYBACK INITIATED IN IFRAME");
+    } else {
+      console.log("⚠️ PLAYBACK NOT CONFIRMED, BUT CONTINUING");
+    }
     console.log("=".repeat(60));
-    
-    // Monitor specifically within the iframe
-    const playingConfirmed = await monitorIframePlayback(page, ytFrame, 30);
+
+    const playingConfirmed = await monitorIframePlayback(page, activeFrame, 30);
     
     if (playingConfirmed) {
-      console.log("\n✅✅✅ SUCCESS! VIDEO PLAYING INSIDE NOTION IFRAME! ✅✅✅\n");
-      console.log("🎯 This will count as legitimate YouTube views and watch time!");
+      console.log("\n🎉🎉🎉 SUCCESS! Video played in iframe for 30 minutes! 🎉🎉🎉\n");
     } else {
-      console.log("\n⚠️  Could not confirm iframe playback, but session completed\n");
+      console.log("\n⚠️ Session completed (playback not confirmed but iframe was active)\n");
     }
     
     process.exitCode = 0;
@@ -469,9 +467,8 @@ async function monitorIframePlayback(page, ytFrame, minutes = 30) {
     process.exitCode = 1;
   } finally {
     if (browser) {
-      console.log("Closing browser...");
       await browser.close();
-      console.log("Done!\n");
+      console.log("Browser closed\n");
     }
   }
 })();
