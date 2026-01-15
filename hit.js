@@ -7,16 +7,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function waitForYouTubeFrame(page, timeoutMs = 60000) {
   const start = Date.now();
-
   while (Date.now() - start < timeoutMs) {
     const frame = page
       .frames()
       .find((f) => /youtube\.com|youtu\.be/i.test(f.url()) && f.url() !== "about:blank");
-
     if (frame) return frame;
     await sleep(500);
   }
-
   return null;
 }
 
@@ -34,40 +31,41 @@ async function clickIframeCenter(page, frame) {
   const cx = box.x + box.width / 2;
   const cy = box.y + box.height / 2;
 
-  await page.mouse.click(cx, cy, { delay: 50 });
+  await page.mouse.click(cx, cy, { delay: 100 });
   return { cx, cy };
 }
 
 async function tryStartPlayback(page, ytFrame) {
-  // Try a few strategies; don't throw if one fails.
   const attempts = [];
 
-  // A) Click big play button
+  // A) Click large play button
   attempts.push(async () => {
     await ytFrame.waitForSelector("button.ytp-large-play-button", { timeout: 7000 });
-    await ytFrame.click("button.ytp-large-play-button", { delay: 50 });
+    await ytFrame.click("button.ytp-large-play-button", { delay: 100 });
     return "clicked ytp-large-play-button";
   });
 
-  // B) Click center of iframe (gesture)
+  // B) Click center of iframe
   attempts.push(async () => {
     await clickIframeCenter(page, ytFrame);
     return "clicked iframe center";
   });
 
-  // C) Press "k" to toggle play (after focus)
+  // C) Focus + press 'k'
   attempts.push(async () => {
+    const iframeHandle = await ytFrame.frameElement();
+    await iframeHandle.focus();
     await page.keyboard.press("k");
     return 'pressed "k"';
   });
 
-  // D) Force play via JS inside frame (sometimes works even when UI click doesn't)
+  // D) Force JS play inside iframe
   attempts.push(async () => {
     const ok = await ytFrame.evaluate(async () => {
       const v = document.querySelector("video");
       if (!v) return false;
       try {
-        v.muted = true; // helps autoplay policies
+        v.muted = true;
         await v.play();
         return true;
       } catch {
@@ -78,14 +76,34 @@ async function tryStartPlayback(page, ytFrame) {
     return "called video.play()";
   });
 
+  // E) Try click with page.evaluate (parent frame script)
+  attempts.push(async () => {
+    const result = await page.evaluate(() => {
+      const iframe = document.querySelector("iframe[src*='youtube']");
+      if (!iframe) return false;
+      const rect = iframe.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      const event = new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        clientX: x,
+        clientY: y,
+      });
+      return iframe.dispatchEvent(event);
+    });
+    if (!result) throw new Error("evaluate click failed");
+    return "clicked center from parent frame";
+  });
+
   for (const fn of attempts) {
     try {
       const msg = await fn();
-      // small pause to let state update
-      await sleep(800);
+      await sleep(1000);
       return msg;
     } catch (_) {
-      // continue
+      continue;
     }
   }
 
@@ -94,7 +112,6 @@ async function tryStartPlayback(page, ytFrame) {
 
 async function waitUntilPlaying(ytFrame, timeoutMs = 20000) {
   const start = Date.now();
-
   while (Date.now() - start < timeoutMs) {
     const state = await ytFrame.evaluate(() => {
       const v = document.querySelector("video");
@@ -107,13 +124,9 @@ async function waitUntilPlaying(ytFrame, timeoutMs = 20000) {
         currentTime: v.currentTime,
       };
     });
-
-    // Consider it "playing" if video exists, not ended, and currentTime is moving / not paused.
     if (state.hasVideo && !state.ended && !state.paused && state.readyState >= 2) return true;
-
     await sleep(500);
   }
-
   return false;
 }
 
@@ -153,9 +166,12 @@ async function waitUntilPlaying(ytFrame, timeoutMs = 20000) {
     console.log("Start attempt:", used);
 
     const isPlaying = await waitUntilPlaying(ytFrame, 25000);
-    console.log(isPlaying ? "Playback started ✅" : "Playback not confirmed ⚠️ (blocked/consent/loading)");
+    console.log(
+      isPlaying
+        ? "Playback started ✅"
+        : "Playback not confirmed ⚠️ (blocked/consent/loading)"
+    );
 
-    // Stay open for 30 minutes (using sleep instead of page.waitForTimeout)
     await sleep(30 * 60 * 1000);
   } catch (err) {
     console.error("ERROR:", err);
